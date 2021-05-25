@@ -1,3 +1,5 @@
+#@auto-fold regex /./
+
 from datetime import datetime, timedelta,date
 import requests as r, pandas as pd,time,sys
 sys.path.insert(0,'C:/Finance/projects/')
