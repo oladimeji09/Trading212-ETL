@@ -1,35 +1,36 @@
 #@auto-fold regex /./
-
-from datetime import datetime, timedelta,date
 import requests as r, pandas as pd,time,sys
 sys.path.insert(0,'C:/Finance/projects/')
-import env,googleapi as gapi
+import env,googleapi as gapi,json
 import selenium.webdriver
-from selenium.webdriver.chrome.options import Options
-from pandas.io.json import json_normalize
-global cookies_dict
-global gf
 cookies_dict ={}
 gf = pd.DataFrame()
 gf2 = pd.DataFrame()
 baseRestUrl = "https://live.trading212.com/rest"
-options = Options()
-options.add_argument('user-data-dir=insert data file path')
-driver = selenium.webdriver.Chrome(executable_path= 'driver file path',  options  = options)
-driver.get('https://live.trading212.com/')
-time.sleep(30)
 
 def get_dates() -> list:
-    StartDate = datetime.strptime('2020-01-01','%Y-%m-%d').date()
-    EndDate = datetime.today().date() #datetime.strptime('2020-12-31','%Y-%m-%d').date()  #
+    StartDate = pd.datetime.strptime('2020-01-01','%Y-%m-%d').date()
+    EndDate =  pd.datetime.today().date() #pd.datetime.strptime('2020-12-31','%Y-%m-%d').date()  #
     return([StartDate,EndDate])
 
+def login():
+    creds = json.load(open(r'C:\Finance\projects\personal\creds.json')).get('tradind212')
+    driver = selenium.webdriver.Chrome(executable_path= env.driver_path)
+    driver.get('https://live.trading212.com/')
+    time.sleep(15)#note change tthis to wait
+    driver.find_element_by_xpath('//*[@id="__next"]/main/div/div/div[2]/div/div[2]/div/form/div[2]/div/div/input').send_keys(creds.get('username'))
+    driver.find_element_by_xpath('//*[@id="__next"]/main/div/div/div[2]/div/div[2]/div/form/div[3]/div/div/input').send_keys(creds.get('password'))
+    driver.find_element_by_xpath('//*[@id="__next"]/main/div/div/div[2]/div/div[2]/div/form/div[5]/input').click()
+    time.sleep(5)
+    return driver
+
 def get_cookies() -> dict:
-    """ Get the current user cookie"""
+    driver = login()
     cookies = driver.get_cookies()
     for cookie in cookies:
         cookies_dict[cookie['name']] = cookie['value']
     cookies_dict.update(cookies_dict)
+    driver.quit()
     return cookies_dict
 
 def get_headers() -> dict:
@@ -52,15 +53,13 @@ def form_data(StartDate,EndDate) -> dict:
            }
     }""" % (StartDate,EndDate)
 
-def get_acc_info():
-    """Get current account info"""
+def get_acc_info(): # NOTE: get the current accounts
     global gf2
     resps = r.get(baseRestUrl+'/v2/account', headers=get_headers(),cookies=cookies_dict)
-    gf2 = gf2.append(json_normalize(resps.json()))
+    gf2 = gf2.append(pd.json_normalize(resps.json()))
     return  resps.json()['id']
 
 def switch_account():
-    """This will switch between ISA and NON-ISA accounts"""
     acc_id =[]
     accs = r.get(baseRestUrl+'/customer/accounts/funds',headers=get_headers(),cookies=cookies_dict)
     for k, v in accs.json().items():
@@ -78,45 +77,41 @@ def switch_account():
             acc_id.clear()
 
 def clear_notfi():
-    """Clear all notifications created"""
     resp = r.get(baseRestUrl+'/v2/notifications',headers=get_headers(), cookies=cookies_dict)
     ids = ','.join(map(str, [i['id'] for i in resp.json()[:8]]))
     resp = r.delete(baseRestUrl+'/v1/notifications/'+ids,headers=get_headers(), cookies=cookies_dict)
     return 'Delete the previus 8 notifications: status_code: ' + str(resp.status_code)
 
 def export_transactions():
-    """Export the data; This will create a report ID and clear notifications"""
-    delta = timedelta(days = 365)
+    delta = pd.Timedelta(days = 365)
     StartDate = get_dates()[0]
     EndDate = get_dates()[1]
     while StartDate < EndDate:
         resp = r.post(baseRestUrl+'/v1/report-exports', headers=get_headers(), cookies=cookies_dict,
-                data=form_data(StartDate, StartDate + timedelta(hours = 8759, seconds= 59)))
+                data=form_data(StartDate, StartDate + pd.Timedelta(hours = 8759, seconds= 59)))
         report_id = resp.json()['reportId']
         print('Exporting transactions from {} to {}, report id: {}, account ID {}'.format(StartDate
-                                    , StartDate + timedelta(hours = 8759, seconds= 59), report_id, get_acc_info()))
+                                    , StartDate + pd.Timedelta(hours = 8759, seconds= 59), report_id, get_acc_info()))
         time.sleep(30)
         download_report(report_id)
         StartDate += delta
     clear_notfi()
 
 def download_report(report_id):
-    """Download the report with transaction data"""
+    global gf
     resp = r.get(baseRestUrl+'/v1/report-exports', headers=get_headers(), cookies=cookies_dict)
-    for item in resp.json():
-        if report_id == item['reportId']:
-            if item['status'] != 'Finished':
-                time.sleep(30)
-            else:
-                try:
+    X = True
+    while X == True:
+        for item in resp.json():
+            if report_id == item['reportId']:
+                if item['status'] == 'Finished':
                     df = pd.read_csv(item['downloadLink'])
-                    df['Account ID'] = get_acc_info()
+                    df['Account ID'] = 'get_acc_info()'
                     gf = gf.append(df)
-                except:
-                    print('No columns to parse from file')
+                    X = False
 
 def save_to_gsheets():
-    """"Move the transaction data into google sheet"""
+    global gf
     gf['Action'] = gf['Action'].replace(regex=[r'Market ','Limit ','Stop '], value='')
     gf['Action'] = gf['Action'].replace('Dividend (Ordinary)','Div')
     gf['Action'] = gf['Action'].str.strip().str.capitalize()
@@ -132,16 +127,17 @@ def save_to_gsheets():
     df = pd.concat([gf, mf], sort=False)
     df = df.reset_index(drop=True)
     df['Time'] = pd.to_datetime(df['Time'])
-    df = df[["Account ID","Action","Charge amount (GBP)","Currency (Price / share)","Currency (Withholding tax)","Exchange rate",
-        "Finra fee (GBP)","ID","ISIN","Name","No. of shares","Notes","Price / share","Result (GBP)","Ticker","Time","Total (GBP)",
-        "Transaction fee (GBP)","Withholding tax","Transaction Date","Stock Split Ratio"]]
+
+
+    df = df[["Time","Account ID","Action","Ticker","No. of shares","Stock Split Ratio","Currency (Price / share)","Price / share","Exchange rate",
+            "Finra fee (GBP)","ID","ISIN","Name","Notes","Result (GBP)","Total (GBP)","Transaction fee (GBP)","Transaction Date","Charge amount (GBP)"]]
     df = df.sort_values(['Time'], ascending=True )
 
-    env.rep_data_sh(df,'18HjRhb8maIt0ypGxSAmjz592_1oQZqEN0f915RlGsjw','T212 Data',df.shape[1])
+    env.rep_data_sh(df,'18HjRhb8maIt0ypGxSAmjz592_1oQZqEN0f915RlGsjw','Stocks: Data')
 
 get_cookies()
 get_acc_info()
 export_transactions()
+save_to_gsheets()
 switch_account()
 export_transactions()
-save_to_gsheets()
